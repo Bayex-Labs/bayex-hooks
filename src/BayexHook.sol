@@ -12,6 +12,8 @@ import {SafeCast} from "v4-core/src/libraries/SafeCast.sol";
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
 import {IERC20Minimal} from "v4-core/src/interfaces/external/IERC20Minimal.sol";
+import {Ownable2Step, Ownable} from "v4-core/lib/openzeppelin-contracts/contracts/access/Ownable2Step.sol";
+import {ReentrancyGuard} from "v4-core/lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
 
 /// @title BayexHook
 /// @notice A Uniswap v4 hook for prediction market pools (USDC / conditional token)
@@ -26,7 +28,14 @@ import {IERC20Minimal} from "v4-core/src/interfaces/external/IERC20Minimal.sol";
 ///   - Hook takes fees from both swap sides using delta returns
 ///   - The USDC/token split is determined by aggregate LP preferences
 ///   - Each LP configures their preferred fee denomination (default 100% USDC)
-contract BayexHook is IHooks {
+///
+/// @dev Known limitation: Fee distribution is proportional to ALL tracked LP liquidity,
+/// not just in-range liquidity. Out-of-range positions earn fees they wouldn't earn in
+/// the standard v4 fee mechanism. For prediction markets with narrow bounded price
+/// ranges, this is mitigated by using wide tick ranges. A production upgrade would
+/// replicate Uniswap's tick-based feeGrowthInside accounting for precise in-range
+/// distribution.
+contract BayexHook is IHooks, Ownable2Step, ReentrancyGuard {
     using PoolIdLibrary for PoolKey;
     using SafeCast for uint256;
     using BalanceDeltaLibrary for BalanceDelta;
@@ -39,54 +48,59 @@ contract BayexHook is IHooks {
     error InvalidFeeSplit();
     error NoPosition();
     error InsufficientLiquidity();
+    error UntrustedRouter();
+    error TransferFailed();
 
     // ─── Events ──────────────────────────────────────────────────────────
     event PoolConfigured(PoolId indexed poolId, uint24 baseFee, uint256 k, uint256 windowSize, uint256 decayRate);
     event DynamicFeeApplied(PoolId indexed poolId, uint24 fee, uint256 imbalanceRatio);
-    event LPPositionUpdated(PoolId indexed poolId, address indexed lp, int24 tickLower, int24 tickUpper, uint128 liquidity);
+    event LPPositionUpdated(
+        PoolId indexed poolId, address indexed lp, int24 tickLower, int24 tickUpper, uint128 liquidity
+    );
     event FeeSplitConfigured(PoolId indexed poolId, address indexed lp, uint256 feeSplitUSDC);
     event FeesClaimed(address indexed lp, uint256 usdcAmount, uint256 tokenAmount);
     event FeesCollected(PoolId indexed poolId, uint256 usdcFee, uint256 tokenFee);
+    event TrustedRouterSet(address indexed router, bool trusted);
 
     // ─── Structs ─────────────────────────────────────────────────────────
 
     struct PoolConfig {
-        uint24 baseFee;      // Minimum fee in hundredths of bip (e.g., 3000 = 0.30%)
-        uint256 k;           // Aggressiveness scalar (fixed-point 1e18 = 1.0)
-        uint256 windowSize;  // Sliding window in seconds
-        uint256 decayRate;   // Decay rate per second (fixed-point 1e18 = 1.0)
+        uint24 baseFee; // Minimum fee in hundredths of bip (e.g., 3000 = 0.30%)
+        uint256 k; // Aggressiveness scalar (fixed-point 1e18 = 1.0)
+        uint256 windowSize; // Sliding window in seconds
+        uint256 decayRate; // Decay rate per second (fixed-point 1e18 = 1.0)
     }
 
     struct FlowState {
-        int256 netFlow;         // Net directional flow (positive = zeroForOne dominant)
-        uint256 totalFlow;      // Absolute total flow volume
+        int256 netFlow; // Net directional flow (positive = zeroForOne dominant)
+        uint256 totalFlow; // Absolute total flow volume
         uint256 lastUpdateTime; // Timestamp of last update
     }
 
     struct LPPosition {
         uint128 liquidity;
-        uint256 feeSplitUSDC;               // WAD = 100% USDC, 0 = 100% token
-        uint256 accruedFeesUSDC;            // Snapshotted unclaimed USDC fees
-        uint256 accruedFeesToken;           // Snapshotted unclaimed token fees
-        uint256 feePerLiqUSDCCheckpoint;    // feePerLiquidityUSDC at last snapshot
-        uint256 feePerLiqTokenCheckpoint;   // feePerLiquidityToken at last snapshot
+        uint256 feeSplitUSDC; // WAD = 100% USDC, 0 = 100% token
+        uint256 accruedFeesUSDC; // Snapshotted unclaimed USDC fees
+        uint256 accruedFeesToken; // Snapshotted unclaimed token fees
+        uint256 feePerLiqUSDCCheckpoint; // feePerLiquidityUSDC at last snapshot
+        uint256 feePerLiqTokenCheckpoint; // feePerLiquidityToken at last snapshot
     }
 
     struct FeeState {
-        uint256 feePerLiquidityUSDC;   // Accumulated USDC fees per unit of USDC-weighted liquidity
-        uint256 feePerLiquidityToken;  // Accumulated token fees per unit of token-weighted liquidity
-        uint256 totalLiquidity;        // Total tracked LP liquidity
-        uint256 totalUSDCWeight;       // sum(LP_liquidity * LP_feeSplitUSDC / WAD)
-        uint256 totalTokenWeight;      // sum(LP_liquidity * (WAD - LP_feeSplitUSDC) / WAD)
+        uint256 feePerLiquidityUSDC; // Accumulated USDC fees per unit of USDC-weighted liquidity
+        uint256 feePerLiquidityToken; // Accumulated token fees per unit of token-weighted liquidity
+        uint256 totalLiquidity; // Total tracked LP liquidity
+        uint256 totalUSDCWeight; // sum(LP_liquidity * LP_feeSplitUSDC / WAD)
+        uint256 totalTokenWeight; // sum(LP_liquidity * (WAD - LP_feeSplitUSDC) / WAD)
     }
 
     // ─── Constants ───────────────────────────────────────────────────────
     uint256 internal constant WAD = 1e18;
     uint24 internal constant MAX_FEE = 1_000_000; // 100% in hundredths of bip
 
-    // Transient storage slots for passing data between beforeSwap and afterSwap
-    // Using literal constants because Solidity inline assembly requires direct number constants
-    // Slot 1: feePercent, Slot 2: aggregateUSDCSplit, Slot 3: specifiedFee, Slot 4: specifiedIsUSDC
+    // Transient storage slots for passing data between beforeSwap and afterSwap.
+    // Slots 1-4 are safe from collision: transient storage is per-contract and per-tx,
+    // and only this contract writes to its own transient slots within a single swap.
 
     // ─── Immutables ──────────────────────────────────────────────────────
     IPoolManager public immutable poolManager;
@@ -96,6 +110,7 @@ contract BayexHook is IHooks {
     mapping(PoolId => FlowState) public flowStates;
     mapping(PoolId => FeeState) public feeStates;
     mapping(bytes32 => LPPosition) public lpPositions;
+    mapping(address => bool) public trustedRouters;
 
     // ─── Modifiers ───────────────────────────────────────────────────────
     modifier onlyPoolManager() {
@@ -104,7 +119,7 @@ contract BayexHook is IHooks {
     }
 
     // ─── Constructor ─────────────────────────────────────────────────────
-    constructor(IPoolManager _poolManager) {
+    constructor(IPoolManager _poolManager, address _owner) Ownable(_owner) {
         poolManager = _poolManager;
     }
 
@@ -129,27 +144,29 @@ contract BayexHook is IHooks {
         });
     }
 
-    // ─── Configuration ───────────────────────────────────────────────────
+    // ─── Admin Functions ─────────────────────────────────────────────────
 
-    function configurePool(
-        PoolKey calldata key,
-        uint24 baseFee,
-        uint256 k,
-        uint256 windowSize,
-        uint256 decayRate
-    ) external {
+    /// @notice Configure the hook parameters for a pool. Owner only.
+    function configurePool(PoolKey calldata key, uint24 baseFee, uint256 k, uint256 windowSize, uint256 decayRate)
+        external
+        onlyOwner
+    {
         if (baseFee > MAX_FEE) revert InvalidParameters();
         if (windowSize == 0) revert InvalidParameters();
 
         PoolId poolId = key.toId();
-        poolConfigs[poolId] = PoolConfig({
-            baseFee: baseFee,
-            k: k,
-            windowSize: windowSize,
-            decayRate: decayRate
-        });
+        poolConfigs[poolId] = PoolConfig({baseFee: baseFee, k: k, windowSize: windowSize, decayRate: decayRate});
 
         emit PoolConfigured(poolId, baseFee, k, windowSize, decayRate);
+    }
+
+    /// @notice Set whether a router contract is trusted for LP operations.
+    /// @dev Trusted routers are responsible for encoding the correct `msg.sender`
+    /// as the LP address in hookData. Only liquidity operations from trusted
+    /// routers are accepted, preventing LP address spoofing.
+    function setTrustedRouter(address router, bool trusted) external onlyOwner {
+        trustedRouters[router] = trusted;
+        emit TrustedRouterSet(router, trusted);
     }
 
     // ─── LP Fee Split Configuration ──────────────────────────────────────
@@ -160,13 +177,9 @@ contract BayexHook is IHooks {
     /// @param tickUpper Upper tick of the position
     /// @param salt Position salt
     /// @param newSplitUSDC New USDC split (WAD = 100% USDC, 0 = 100% token)
-    function configureFeeSplit(
-        PoolKey calldata key,
-        int24 tickLower,
-        int24 tickUpper,
-        bytes32 salt,
-        uint256 newSplitUSDC
-    ) external {
+    function configureFeeSplit(PoolKey calldata key, int24 tickLower, int24 tickUpper, bytes32 salt, uint256 newSplitUSDC)
+        external
+    {
         if (newSplitUSDC > WAD) revert InvalidFeeSplit();
 
         PoolId poolId = key.toId();
@@ -201,12 +214,10 @@ contract BayexHook is IHooks {
     // ─── Fee Claims ──────────────────────────────────────────────────────
 
     /// @notice LP claims their accrued fees for a position.
-    function claimFees(
-        PoolKey calldata key,
-        int24 tickLower,
-        int24 tickUpper,
-        bytes32 salt
-    ) external {
+    function claimFees(PoolKey calldata key, int24 tickLower, int24 tickUpper, bytes32 salt)
+        external
+        nonReentrant
+    {
         PoolId poolId = key.toId();
         bytes32 posKey = _positionKey(poolId, msg.sender, tickLower, tickUpper, salt);
         LPPosition storage pos = lpPositions[posKey];
@@ -228,10 +239,10 @@ contract BayexHook is IHooks {
 
         // Transfer USDC (currency0) and token (currency1) to LP
         if (usdcAmount > 0) {
-            IERC20Minimal(Currency.unwrap(key.currency0)).transfer(msg.sender, usdcAmount);
+            _safeTransfer(Currency.unwrap(key.currency0), msg.sender, usdcAmount);
         }
         if (tokenAmount > 0) {
-            IERC20Minimal(Currency.unwrap(key.currency1)).transfer(msg.sender, tokenAmount);
+            _safeTransfer(Currency.unwrap(key.currency1), msg.sender, tokenAmount);
         }
 
         emit FeesClaimed(msg.sender, usdcAmount, tokenAmount);
@@ -255,12 +266,14 @@ contract BayexHook is IHooks {
     }
 
     function beforeAddLiquidity(
-        address,
+        address sender,
         PoolKey calldata,
-        IPoolManager.ModifyLiquidityParams calldata,
+        IPoolManager.ModifyLiquidityParams calldata params,
         bytes calldata hookData
     ) external virtual onlyPoolManager returns (bytes4) {
+        if (!trustedRouters[sender]) revert UntrustedRouter();
         if (hookData.length < 32) revert InvalidHookData();
+        if (params.liquidityDelta <= 0) revert InvalidParameters();
         return IHooks.beforeAddLiquidity.selector;
     }
 
@@ -277,11 +290,12 @@ contract BayexHook is IHooks {
     }
 
     function beforeRemoveLiquidity(
-        address,
+        address sender,
         PoolKey calldata,
         IPoolManager.ModifyLiquidityParams calldata,
         bytes calldata hookData
     ) external virtual onlyPoolManager returns (bytes4) {
+        if (!trustedRouters[sender]) revert UntrustedRouter();
         if (hookData.length < 32) revert InvalidHookData();
         return IHooks.beforeRemoveLiquidity.selector;
     }
@@ -321,10 +335,15 @@ contract BayexHook is IHooks {
         uint256 aggregateUSDCSplit = (fState.totalUSDCWeight * WAD) / fState.totalLiquidity;
         uint256 specifiedFee = _computeSpecifiedFee(params, feePercent, aggregateUSDCSplit);
 
-        // Take the specified-side fee tokens to the hook
+        // Only take if there is weight to distribute to; otherwise fees would be stuck
         if (specifiedFee > 0) {
             bool specifiedIsUSDC = (params.amountSpecified < 0) == params.zeroForOne;
-            poolManager.take(specifiedIsUSDC ? key.currency0 : key.currency1, address(this), specifiedFee);
+            bool hasWeight = specifiedIsUSDC ? fState.totalUSDCWeight > 0 : fState.totalTokenWeight > 0;
+            if (!hasWeight) {
+                specifiedFee = 0;
+            } else {
+                poolManager.take(specifiedIsUSDC ? key.currency0 : key.currency1, address(this), specifiedFee);
+            }
         }
 
         // Store data in transient storage for afterSwap
@@ -333,7 +352,6 @@ contract BayexHook is IHooks {
             tstore(2, aggregateUSDCSplit)
             tstore(3, specifiedFee)
         }
-        // Store specifiedIsUSDC separately (bool)
         {
             bool specifiedIsUSDC = (params.amountSpecified < 0) == params.zeroForOne;
             assembly {
@@ -386,12 +404,17 @@ contract BayexHook is IHooks {
 
     // ─── Internal Helpers ────────────────────────────────────────────────
 
+    /// @notice Safely transfers ERC20 tokens, reverting on failure.
+    function _safeTransfer(address token, address to, uint256 amount) internal {
+        bool success = IERC20Minimal(token).transfer(to, amount);
+        if (!success) revert TransferFailed();
+    }
+
     /// @notice Collects fee from the unspecified side and updates accumulators.
-    function _collectUnspecifiedFee(
-        PoolKey calldata key,
-        BalanceDelta delta,
-        FeeState storage fState
-    ) internal returns (uint256 unspecifiedFee) {
+    function _collectUnspecifiedFee(PoolKey calldata key, BalanceDelta delta, FeeState storage fState)
+        internal
+        returns (uint256 unspecifiedFee)
+    {
         // Read transient storage from beforeSwap
         uint256 feePercent;
         uint256 aggregateUSDCSplit;
@@ -407,18 +430,23 @@ contract BayexHook is IHooks {
 
         // Get the unspecified-side amount from delta
         int128 unspecifiedAmount = specifiedIsUSDC ? delta.amount1() : delta.amount0();
-        uint256 absUnspecified = unspecifiedAmount < 0
-            ? uint256(uint128(-unspecifiedAmount))
-            : uint256(uint128(unspecifiedAmount));
+        uint256 absUnspecified =
+            unspecifiedAmount < 0 ? uint256(uint128(-unspecifiedAmount)) : uint256(uint128(unspecifiedAmount));
 
         // Compute unspecified-side fee
         uint256 unspecifiedFeeRatio = specifiedIsUSDC ? (WAD - aggregateUSDCSplit) : aggregateUSDCSplit;
         unspecifiedFee = (absUnspecified * feePercent * unspecifiedFeeRatio) / (uint256(MAX_FEE) * WAD);
 
-        // Take the unspecified-side fee tokens
+        // Only take if there is weight to distribute to; otherwise fees would be stuck
         if (unspecifiedFee > 0) {
-            Currency unspecifiedCurrency = specifiedIsUSDC ? key.currency1 : key.currency0;
-            poolManager.take(unspecifiedCurrency, address(this), unspecifiedFee);
+            bool unspecifiedIsUSDC = !specifiedIsUSDC;
+            bool hasWeight = unspecifiedIsUSDC ? fState.totalUSDCWeight > 0 : fState.totalTokenWeight > 0;
+            if (!hasWeight) {
+                unspecifiedFee = 0;
+            } else {
+                Currency unspecifiedCurrency = specifiedIsUSDC ? key.currency1 : key.currency0;
+                poolManager.take(unspecifiedCurrency, address(this), unspecifiedFee);
+            }
         }
 
         // Determine which fees are USDC vs token and update accumulators
@@ -492,25 +520,24 @@ contract BayexHook is IHooks {
     }
 
     /// @notice Computes the fee amount to take from the specified side of the swap.
-    function _computeSpecifiedFee(
-        IPoolManager.SwapParams calldata params,
-        uint24 feePercent,
-        uint256 aggregateUSDCSplit
-    ) internal pure returns (uint256) {
+    function _computeSpecifiedFee(IPoolManager.SwapParams calldata params, uint24 feePercent, uint256 aggregateUSDCSplit)
+        internal
+        pure
+        returns (uint256)
+    {
         bool specifiedIsUSDC = (params.amountSpecified < 0) == params.zeroForOne;
-        uint256 absAmount = params.amountSpecified < 0
-            ? uint256(-params.amountSpecified)
-            : uint256(params.amountSpecified);
+        uint256 absAmount =
+            params.amountSpecified < 0 ? uint256(-params.amountSpecified) : uint256(params.amountSpecified);
         uint256 specifiedFeeRatio = specifiedIsUSDC ? aggregateUSDCSplit : (WAD - aggregateUSDCSplit);
         return (absAmount * uint256(feePercent) * specifiedFeeRatio) / (uint256(MAX_FEE) * WAD);
     }
 
     /// @notice Computes the dynamic fee based on projected flow imbalance.
-    function _computeFee(
-        PoolConfig storage config,
-        FlowState storage state,
-        IPoolManager.SwapParams calldata params
-    ) internal view returns (uint24) {
+    function _computeFee(PoolConfig storage config, FlowState storage state, IPoolManager.SwapParams calldata params)
+        internal
+        view
+        returns (uint24)
+    {
         uint24 baseFee = config.baseFee;
         uint256 k = config.k;
 
@@ -518,13 +545,10 @@ contract BayexHook is IHooks {
             state.netFlow, state.totalFlow, block.timestamp - state.lastUpdateTime, config.decayRate, config.windowSize
         );
 
-        uint256 absAmount = params.amountSpecified >= 0
-            ? uint256(params.amountSpecified)
-            : uint256(-params.amountSpecified);
+        uint256 absAmount =
+            params.amountSpecified >= 0 ? uint256(params.amountSpecified) : uint256(-params.amountSpecified);
 
-        int256 projectedNet = params.zeroForOne
-            ? decayedNet + int256(absAmount)
-            : decayedNet - int256(absAmount);
+        int256 projectedNet = params.zeroForOne ? decayedNet + int256(absAmount) : decayedNet - int256(absAmount);
         uint256 projectedTotal = decayedTotal + absAmount;
 
         if (projectedTotal == 0) return baseFee;
@@ -536,11 +560,9 @@ contract BayexHook is IHooks {
     }
 
     /// @notice Updates flow state after a swap.
-    function _updateFlowState(
-        PoolConfig storage config,
-        FlowState storage state,
-        IPoolManager.SwapParams calldata params
-    ) internal {
+    function _updateFlowState(PoolConfig storage config, FlowState storage state, IPoolManager.SwapParams calldata params)
+        internal
+    {
         uint256 elapsed = block.timestamp - state.lastUpdateTime;
         (int256 decayedNet, uint256 decayedTotal) =
             _applyDecay(state.netFlow, state.totalFlow, elapsed, config.decayRate, config.windowSize);
@@ -561,13 +583,11 @@ contract BayexHook is IHooks {
     }
 
     /// @notice Applies exponential-like decay to flow state based on elapsed time.
-    function _applyDecay(
-        int256 netFlow,
-        uint256 totalFlow,
-        uint256 elapsed,
-        uint256 decayRate,
-        uint256 windowSize
-    ) internal pure returns (int256 decayedNet, uint256 decayedTotal) {
+    function _applyDecay(int256 netFlow, uint256 totalFlow, uint256 elapsed, uint256 decayRate, uint256 windowSize)
+        internal
+        pure
+        returns (int256 decayedNet, uint256 decayedTotal)
+    {
         if (elapsed == 0) {
             return (netFlow, totalFlow);
         }
@@ -605,13 +625,11 @@ contract BayexHook is IHooks {
     }
 
     /// @notice Computes the unique key for an LP position.
-    function _positionKey(
-        PoolId poolId,
-        address lp,
-        int24 tickLower,
-        int24 tickUpper,
-        bytes32 salt
-    ) internal pure returns (bytes32) {
+    function _positionKey(PoolId poolId, address lp, int24 tickLower, int24 tickUpper, bytes32 salt)
+        internal
+        pure
+        returns (bytes32)
+    {
         return keccak256(abi.encodePacked(PoolId.unwrap(poolId), lp, tickLower, tickUpper, salt));
     }
 
@@ -658,13 +676,11 @@ contract BayexHook is IHooks {
     }
 
     /// @notice Returns pending (unclaimed) fees for an LP position.
-    function getPendingFees(
-        PoolKey calldata key,
-        address lp,
-        int24 tickLower,
-        int24 tickUpper,
-        bytes32 salt
-    ) external view returns (uint256 pendingUSDC, uint256 pendingToken) {
+    function getPendingFees(PoolKey calldata key, address lp, int24 tickLower, int24 tickUpper, bytes32 salt)
+        external
+        view
+        returns (uint256 pendingUSDC, uint256 pendingToken)
+    {
         PoolId poolId = key.toId();
         bytes32 posKey = _positionKey(poolId, lp, tickLower, tickUpper, salt);
         LPPosition storage pos = lpPositions[posKey];

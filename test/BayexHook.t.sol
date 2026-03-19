@@ -34,13 +34,13 @@ contract BayexHookTest is Test, Deployers {
     address constant LP1 = address(0xA001);
     address constant LP2 = address(0xA002);
 
+    // Owner of the hook
+    address constant OWNER = address(0xBEEF);
+
     function setUp() public {
         deployFreshManagerAndRouters();
         deployMintAndApprove2Currencies();
 
-        // Hook flags: afterInitialize | beforeAddLiquidity | afterAddLiquidity |
-        // beforeRemoveLiquidity | afterRemoveLiquidity | beforeSwap | afterSwap |
-        // beforeSwapReturnDelta | afterSwapReturnDelta
         uint160 flags = uint160(
             Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG
                 | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG
@@ -48,7 +48,9 @@ contract BayexHookTest is Test, Deployers {
         );
         address hookAddress = address(uint160(uint256(type(uint160).max) & clearAllHookPermissionsMask | flags));
 
-        deployCodeTo("BayexHook.sol:BayexHook", abi.encode(address(manager)), hookAddress);
+        deployCodeTo(
+            "BayexHook.sol:BayexHook", abi.encode(address(manager), OWNER), hookAddress
+        );
         hook = BayexHook(hookAddress);
 
         poolKey = PoolKey({
@@ -60,7 +62,13 @@ contract BayexHookTest is Test, Deployers {
         });
         poolId = poolKey.toId();
 
+        // Owner configures pool and trusts the routers
+        vm.startPrank(OWNER);
         hook.configurePool(poolKey, BASE_FEE, K, WINDOW_SIZE, DECAY_RATE);
+        hook.setTrustedRouter(address(modifyLiquidityRouter), true);
+        vm.stopPrank();
+
+        // Initialize pool
         manager.initialize(poolKey, SQRT_PRICE_1_1);
 
         // Add liquidity with LP1 encoded in hookData
@@ -80,6 +88,10 @@ contract BayexHookTest is Test, Deployers {
         assertEq(k, K);
         assertEq(windowSize, WINDOW_SIZE);
         assertEq(decayRate, DECAY_RATE);
+    }
+
+    function test_ownerIsSet() public view {
+        assertEq(hook.owner(), OWNER);
     }
 
     function test_flowStateInitialized() public view {
@@ -108,10 +120,85 @@ contract BayexHookTest is Test, Deployers {
         assertEq(split, 1e18); // 100% USDC
     }
 
+    // ─── Access Control Tests ────────────────────────────────────────────
+
+    function test_onlyOwnerCanConfigurePool() public {
+        vm.prank(address(0xdead));
+        vm.expectRevert();
+        hook.configurePool(poolKey, BASE_FEE, K, WINDOW_SIZE, DECAY_RATE);
+    }
+
+    function test_onlyOwnerCanSetTrustedRouter() public {
+        vm.prank(address(0xdead));
+        vm.expectRevert();
+        hook.setTrustedRouter(address(0x1234), true);
+    }
+
+    function test_onlyPoolManagerCanCallBeforeSwap() public {
+        vm.prank(address(0xdead));
+        vm.expectRevert(BayexHook.OnlyPoolManager.selector);
+        hook.beforeSwap(
+            address(this),
+            poolKey,
+            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -1e15, sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
+            ZERO_BYTES
+        );
+    }
+
+    function test_onlyPoolManagerCanCallAfterSwap() public {
+        vm.prank(address(0xdead));
+        vm.expectRevert(BayexHook.OnlyPoolManager.selector);
+        hook.afterSwap(
+            address(this),
+            poolKey,
+            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -1e15, sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
+            BalanceDelta.wrap(0),
+            ZERO_BYTES
+        );
+    }
+
+    // ─── Trusted Router Tests ────────────────────────────────────────────
+
+    function test_revertAddLiquidityFromUntrustedRouter() public {
+        // modifyLiquidityNoChecks is NOT trusted
+        vm.expectRevert();
+        modifyLiquidityNoChecks.modifyLiquidity(
+            poolKey,
+            IPoolManager.ModifyLiquidityParams({tickLower: -120, tickUpper: 120, liquidityDelta: 1e18, salt: 0}),
+            abi.encode(LP2)
+        );
+    }
+
+    function test_trustedRouterCanAddLiquidity() public {
+        // modifyLiquidityRouter IS trusted (set in setUp)
+        modifyLiquidityRouter.modifyLiquidity(
+            poolKey,
+            IPoolManager.ModifyLiquidityParams({
+                tickLower: -120,
+                tickUpper: 120,
+                liquidityDelta: 1e18,
+                salt: bytes32(uint256(1))
+            }),
+            abi.encode(LP2)
+        );
+
+        bytes32 posKey = _positionKey(LP2, -120, 120, bytes32(uint256(1)));
+        (uint128 liquidity,,,,,) = hook.lpPositions(posKey);
+        assertEq(liquidity, 1e18);
+    }
+
+    function test_revertAddLiquidityWithoutHookData() public {
+        vm.expectRevert();
+        modifyLiquidityRouter.modifyLiquidity(
+            poolKey,
+            IPoolManager.ModifyLiquidityParams({tickLower: -120, tickUpper: 120, liquidityDelta: 1e18, salt: 0}),
+            ZERO_BYTES
+        );
+    }
+
     // ─── Swap Fee Collection Tests ───────────────────────────────────────
 
     function test_swapCollectsFeesInUSDC() public {
-        // With default 100% USDC split, all fees should be in USDC (currency0)
         uint256 hookBalance0Before = IERC20Minimal(Currency.unwrap(currency0)).balanceOf(address(hook));
         uint256 hookBalance1Before = IERC20Minimal(Currency.unwrap(currency1)).balanceOf(address(hook));
 
@@ -121,14 +208,12 @@ contract BayexHookTest is Test, Deployers {
         uint256 hookBalance0After = IERC20Minimal(Currency.unwrap(currency0)).balanceOf(address(hook));
         uint256 hookBalance1After = IERC20Minimal(Currency.unwrap(currency1)).balanceOf(address(hook));
 
-        // Hook should have collected USDC fees (specified side is USDC for zeroForOne exactInput)
         assertGt(hookBalance0After, hookBalance0Before, "hook should collect USDC fees");
-        // With 100% USDC split, no token fees should be collected from the unspecified side
+        // With 100% USDC split, no token fees should be collected
         assertEq(hookBalance1After, hookBalance1Before, "hook should not collect token fees with 100% USDC split");
     }
 
     function test_swapCollectsFeesBothSidesWithMixedSplit() public {
-        // Change LP1 split to 50/50
         vm.prank(LP1);
         hook.configureFeeSplit(poolKey, -120, 120, bytes32(0), 0.5e18);
 
@@ -140,7 +225,6 @@ contract BayexHookTest is Test, Deployers {
         uint256 hookBalance0After = IERC20Minimal(Currency.unwrap(currency0)).balanceOf(address(hook));
         uint256 hookBalance1After = IERC20Minimal(Currency.unwrap(currency1)).balanceOf(address(hook));
 
-        // With 50/50 split, both USDC and token fees should be collected
         assertGt(hookBalance0After, hookBalance0Before, "hook should collect USDC fees");
         assertGt(hookBalance1After, hookBalance1Before, "hook should collect token fees");
     }
@@ -148,18 +232,13 @@ contract BayexHookTest is Test, Deployers {
     // ─── Fee Claiming Tests ─────────────────────────────────────────────
 
     function test_claimFeesAfterSwap() public {
-        // Perform some swaps to accumulate fees
         swap(poolKey, true, -1e15, abi.encode(LP1));
         swap(poolKey, false, -1e15, abi.encode(LP1));
 
-        // Check pending fees
-        (uint256 pendingUSDC, uint256 pendingToken) =
-            hook.getPendingFees(poolKey, LP1, -120, 120, bytes32(0));
+        (uint256 pendingUSDC, uint256 pendingToken) = hook.getPendingFees(poolKey, LP1, -120, 120, bytes32(0));
         assertGt(pendingUSDC, 0, "should have pending USDC fees");
-        // With 100% USDC split, token fees should be 0
         assertEq(pendingToken, 0, "should have no pending token fees with 100% split");
 
-        // Claim fees
         uint256 lp1Balance0Before = IERC20Minimal(Currency.unwrap(currency0)).balanceOf(LP1);
         vm.prank(LP1);
         hook.claimFees(poolKey, -120, 120, bytes32(0));
@@ -167,7 +246,6 @@ contract BayexHookTest is Test, Deployers {
 
         assertGt(lp1Balance0After, lp1Balance0Before, "LP should receive USDC fees");
 
-        // Pending fees should be zero after claim
         (pendingUSDC, pendingToken) = hook.getPendingFees(poolKey, LP1, -120, 120, bytes32(0));
         assertEq(pendingUSDC, 0, "pending USDC should be 0 after claim");
         assertEq(pendingToken, 0, "pending token should be 0 after claim");
@@ -176,7 +254,6 @@ contract BayexHookTest is Test, Deployers {
     // ─── Fee Split Configuration Tests ──────────────────────────────────
 
     function test_configureFeeSplit() public {
-        // LP1 changes to 50% USDC
         vm.prank(LP1);
         hook.configureFeeSplit(poolKey, -120, 120, bytes32(0), 0.5e18);
 
@@ -184,26 +261,21 @@ contract BayexHookTest is Test, Deployers {
         (, uint256 feeSplitUSDC,,,,) = hook.lpPositions(posKey);
         assertEq(feeSplitUSDC, 0.5e18);
 
-        // Check pool weights updated
         (,, uint256 totalLiquidity, uint256 totalUSDCWeight, uint256 totalTokenWeight) = hook.feeStates(poolId);
         assertEq(totalLiquidity, 10e18);
-        assertEq(totalUSDCWeight, 5e18); // 50% of 10e18
-        assertEq(totalTokenWeight, 5e18); // 50% of 10e18
+        assertEq(totalUSDCWeight, 5e18);
+        assertEq(totalTokenWeight, 5e18);
     }
 
     function test_configureFeeSplitSnapshotsFees() public {
-        // Accumulate some fees first
         swap(poolKey, true, -1e15, abi.encode(LP1));
 
-        // Check pending fees before split change
         (uint256 pendingBefore,) = hook.getPendingFees(poolKey, LP1, -120, 120, bytes32(0));
         assertGt(pendingBefore, 0, "should have fees before split change");
 
-        // Change split - should snapshot existing fees
         vm.prank(LP1);
         hook.configureFeeSplit(poolKey, -120, 120, bytes32(0), 0.5e18);
 
-        // Pending fees should still include the snapshotted amount
         (uint256 pendingAfter,) = hook.getPendingFees(poolKey, LP1, -120, 120, bytes32(0));
         assertEq(pendingAfter, pendingBefore, "snapshotted fees should be preserved");
     }
@@ -223,26 +295,27 @@ contract BayexHookTest is Test, Deployers {
     // ─── Multiple LPs Tests ─────────────────────────────────────────────
 
     function test_multipleLPsWithDifferentSplits() public {
-        // Add LP2 with separate position
-        bytes memory hookData = abi.encode(LP2);
+        // Add LP2
         modifyLiquidityRouter.modifyLiquidity(
             poolKey,
-            IPoolManager.ModifyLiquidityParams({tickLower: -120, tickUpper: 120, liquidityDelta: 10e18, salt: bytes32(uint256(1))}),
-            hookData
+            IPoolManager.ModifyLiquidityParams({
+                tickLower: -120,
+                tickUpper: 120,
+                liquidityDelta: 10e18,
+                salt: bytes32(uint256(1))
+            }),
+            abi.encode(LP2)
         );
 
         // LP2 changes to 0% USDC (100% token)
         vm.prank(LP2);
         hook.configureFeeSplit(poolKey, -120, 120, bytes32(uint256(1)), 0);
 
-        // Check aggregate: LP1=10e18@100%, LP2=10e18@0% → 50% aggregate
         uint256 split = hook.getAggregateUSDCSplit(poolKey);
         assertEq(split, 0.5e18, "aggregate should be 50% USDC");
 
-        // Do a swap
         swap(poolKey, true, -1e15, abi.encode(LP1));
 
-        // LP1 should accrue USDC fees, LP2 should accrue token fees
         (uint256 lp1USDC, uint256 lp1Token) = hook.getPendingFees(poolKey, LP1, -120, 120, bytes32(0));
         (uint256 lp2USDC, uint256 lp2Token) = hook.getPendingFees(poolKey, LP2, -120, 120, bytes32(uint256(1)));
 
@@ -255,24 +328,20 @@ contract BayexHookTest is Test, Deployers {
     // ─── Remove Liquidity Tests ─────────────────────────────────────────
 
     function test_removeLiquidityPreservesAccruedFees() public {
-        // Accumulate fees
         swap(poolKey, true, -1e15, abi.encode(LP1));
 
         (uint256 pendingBefore,) = hook.getPendingFees(poolKey, LP1, -120, 120, bytes32(0));
         assertGt(pendingBefore, 0);
 
-        // Remove half the liquidity
         modifyLiquidityRouter.modifyLiquidity(
             poolKey,
             IPoolManager.ModifyLiquidityParams({tickLower: -120, tickUpper: 120, liquidityDelta: -5e18, salt: 0}),
             abi.encode(LP1)
         );
 
-        // Accrued fees should still be claimable
         (uint256 pendingAfter,) = hook.getPendingFees(poolKey, LP1, -120, 120, bytes32(0));
         assertEq(pendingAfter, pendingBefore, "accrued fees should be preserved after remove");
 
-        // LP can still claim
         vm.prank(LP1);
         hook.claimFees(poolKey, -120, 120, bytes32(0));
 
@@ -280,7 +349,22 @@ contract BayexHookTest is Test, Deployers {
         assertGt(lp1Balance, 0, "LP should receive fees after partial remove");
     }
 
-    // ─── Flow Imbalance & Decay Tests (preserved from original) ─────────
+    // ─── Zero-Weight Edge Case Tests ────────────────────────────────────
+
+    function test_zeroTokenWeightSkipsTake() public {
+        // Default: 100% USDC split, so totalTokenWeight = 0
+        // Swap should NOT take token fees (they'd be stuck)
+        (,,,, uint256 totalTokenWeight) = hook.feeStates(poolId);
+        assertEq(totalTokenWeight, 0);
+
+        uint256 hookBalance1Before = IERC20Minimal(Currency.unwrap(currency1)).balanceOf(address(hook));
+        swap(poolKey, true, -1e15, abi.encode(LP1));
+        uint256 hookBalance1After = IERC20Minimal(Currency.unwrap(currency1)).balanceOf(address(hook));
+
+        assertEq(hookBalance1After, hookBalance1Before, "no token fees taken when tokenWeight is 0");
+    }
+
+    // ─── Flow Imbalance & Decay Tests ───────────────────────────────────
 
     function test_firstSwapPaysProjectedFee() public {
         uint24 feeBefore = hook.getCurrentFee(poolKey);
@@ -361,59 +445,26 @@ contract BayexHookTest is Test, Deployers {
         assertLt(ratio, 0.1e18);
     }
 
-    // ─── Configuration Tests ─────────────────────────────────────────────
+    // ─── Configuration Validation Tests ──────────────────────────────────
 
     function test_revertOnInvalidBaseFee() public {
+        vm.prank(OWNER);
         vm.expectRevert(BayexHook.InvalidParameters.selector);
         hook.configurePool(poolKey, uint24(1_000_001), K, WINDOW_SIZE, DECAY_RATE);
     }
 
     function test_revertOnZeroWindow() public {
+        vm.prank(OWNER);
         vm.expectRevert(BayexHook.InvalidParameters.selector);
         hook.configurePool(poolKey, BASE_FEE, K, 0, DECAY_RATE);
     }
 
     function test_feeCappedAtMax() public {
+        vm.prank(OWNER);
         hook.configurePool(poolKey, BASE_FEE, 2_000_000, WINDOW_SIZE, DECAY_RATE);
         swap(poolKey, true, -1e15, abi.encode(LP1));
         uint24 fee = hook.getCurrentFee(poolKey);
         assertEq(fee, 1_000_000);
-    }
-
-    // ─── Access Control Tests ────────────────────────────────────────────
-
-    function test_onlyPoolManagerCanCallBeforeSwap() public {
-        vm.prank(address(0xdead));
-        vm.expectRevert(BayexHook.OnlyPoolManager.selector);
-        hook.beforeSwap(
-            address(this),
-            poolKey,
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -1e15, sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
-            ZERO_BYTES
-        );
-    }
-
-    function test_onlyPoolManagerCanCallAfterSwap() public {
-        vm.prank(address(0xdead));
-        vm.expectRevert(BayexHook.OnlyPoolManager.selector);
-        hook.afterSwap(
-            address(this),
-            poolKey,
-            IPoolManager.SwapParams({zeroForOne: true, amountSpecified: -1e15, sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
-            BalanceDelta.wrap(0),
-            ZERO_BYTES
-        );
-    }
-
-    // ─── hookData Validation Tests ───────────────────────────────────────
-
-    function test_revertAddLiquidityWithoutHookData() public {
-        vm.expectRevert(); // PoolManager wraps the revert
-        modifyLiquidityRouter.modifyLiquidity(
-            poolKey,
-            IPoolManager.ModifyLiquidityParams({tickLower: -120, tickUpper: 120, liquidityDelta: 1e18, salt: 0}),
-            ZERO_BYTES
-        );
     }
 
     // ─── Arbitrage Scenario Test ─────────────────────────────────────────
@@ -444,28 +495,52 @@ contract BayexHookTest is Test, Deployers {
     // ─── Fee Split Change with Subsequent Fees Test ─────────────────────
 
     function test_feeSplitChangeAffectsSubsequentFees() public {
-        // Swap to accumulate USDC fees at 100% split
         swap(poolKey, true, -1e15, abi.encode(LP1));
         (uint256 usdcBefore,) = hook.getPendingFees(poolKey, LP1, -120, 120, bytes32(0));
 
-        // Change to 50/50
         vm.prank(LP1);
         hook.configureFeeSplit(poolKey, -120, 120, bytes32(0), 0.5e18);
 
-        // Swap again - now fees should split
         swap(poolKey, true, -1e15, abi.encode(LP1));
 
         (uint256 usdcAfter, uint256 tokenAfter) = hook.getPendingFees(poolKey, LP1, -120, 120, bytes32(0));
 
-        // USDC fees should have increased from the second swap
         assertGt(usdcAfter, usdcBefore, "USDC fees should increase");
-        // Token fees should also appear from the second swap
         assertGt(tokenAfter, 0, "should have token fees after 50/50 split");
+    }
+
+    // ─── Ownership Transfer Test ─────────────────────────────────────────
+
+    function test_ownershipTransfer() public {
+        address newOwner = address(0xCAFE);
+
+        vm.prank(OWNER);
+        hook.transferOwnership(newOwner);
+
+        // Pending owner should be set
+        assertEq(hook.pendingOwner(), newOwner);
+        // Old owner is still owner until accepted
+        assertEq(hook.owner(), OWNER);
+
+        // New owner accepts
+        vm.prank(newOwner);
+        hook.acceptOwnership();
+        assertEq(hook.owner(), newOwner);
+
+        // New owner can configure
+        vm.prank(newOwner);
+        hook.configurePool(poolKey, 5000, K, WINDOW_SIZE, DECAY_RATE);
+        (uint24 baseFee,,,) = hook.poolConfigs(poolId);
+        assertEq(baseFee, 5000);
     }
 
     // ─── Helper ──────────────────────────────────────────────────────────
 
-    function _positionKey(address lp, int24 tickLower, int24 tickUpper, bytes32 salt) internal view returns (bytes32) {
+    function _positionKey(address lp, int24 tickLower, int24 tickUpper, bytes32 salt)
+        internal
+        view
+        returns (bytes32)
+    {
         return keccak256(abi.encodePacked(PoolId.unwrap(poolId), lp, tickLower, tickUpper, salt));
     }
 }
