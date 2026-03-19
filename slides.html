@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bayex — Arbitrage-Resistant Fees for Prediction Markets</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/black.css">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --violet: #8b5cf6;
+  --violet-light: #a78bfa;
+  --violet-lighter: #c4b5fd;
+  --violet-dark: #6d28d9;
+  --fuchsia: #d946ef;
+  --cyan: #22d3ee;
+  --emerald: #34d399;
+  --amber: #fbbf24;
+  --rose: #fb7185;
+  --bg: #08060f;
+  --card-bg: #110e1d;
+  --card-border: rgba(139, 92, 246, 0.12);
+  --text: #eae6f2;
+  --text-dim: #9e96b0;
+  --text-muted: #6b6280;
+}
+
+.reveal-viewport { background: var(--bg) !important; }
+
+.reveal {
+  font-family: 'Inter', sans-serif;
+  font-size: 24px;
+  color: var(--text);
+}
+
+/* Force all slides to top-left alignment */
+.reveal .slides > section {
+  text-align: left !important;
+  padding: 52px 68px 40px;
+  display: flex !important;
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: stretch;
+  height: 100%;
+}
+
+/* ── Typography ── */
+.reveal h1 {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 2.2em;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: var(--violet-lighter);
+  margin: 0 0 16px 0;
+  line-height: 1.15;
+}
+
+.reveal h2 {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 1.2em;
+  font-weight: 600;
+  color: var(--violet-light);
+  margin: 0 0 14px 0;
+  letter-spacing: -0.01em;
+}
+
+.reveal h3 {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 0.68em;
+  font-weight: 600;
+  color: var(--violet-light);
+  margin: 0 0 8px 0;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.reveal p {
+  line-height: 1.7;
+  margin: 0 0 10px 0;
+}
+
+.reveal strong { color: var(--fuchsia); font-weight: 600; }
+
+.reveal code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.82em;
+  background: rgba(139, 92, 246, 0.1);
+  color: var(--cyan);
+  padding: 2px 8px;
+  border-radius: 5px;
+  border: 1px solid rgba(139, 92, 246, 0.12);
+}
+
+.reveal pre {
+  width: 100%;
+  margin: 10px 0;
+  border-radius: 12px;
+  box-shadow: none;
+}
+
+.reveal pre code {
+  font-size: 0.64em;
+  line-height: 1.65;
+  padding: 18px 24px;
+  border-radius: 12px;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  display: block;
+}
+
+/* ── Reusable components ── */
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 14px;
+  padding: 20px 22px;
+}
+
+.card-v { border-top: 2px solid var(--violet); }
+.card-f { border-top: 2px solid var(--fuchsia); }
+.card-c { border-top: 2px solid var(--cyan); }
+.card-e { border-top: 2px solid var(--emerald); }
+
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+.mt { margin-top: 14px; }
+.mb { margin-bottom: 14px; }
+
+.pill {
+  display: inline-block;
+  padding: 3px 12px;
+  border-radius: 100px;
+  font-size: 0.7em;
+  font-weight: 500;
+}
+
+.pill-v  { background: rgba(139,92,246,0.1); color: var(--violet-lighter); border: 1px solid rgba(139,92,246,0.18); }
+.pill-g  { background: rgba(52,211,153,0.08); color: var(--emerald); border: 1px solid rgba(52,211,153,0.18); }
+.pill-r  { background: rgba(251,113,133,0.08); color: var(--rose); border: 1px solid rgba(251,113,133,0.18); }
+.pill-a  { background: rgba(251,191,36,0.08); color: var(--amber); border: 1px solid rgba(251,191,36,0.18); }
+.pill-c  { background: rgba(34,211,238,0.08); color: var(--cyan); border: 1px solid rgba(34,211,238,0.18); }
+.pill-f  { background: rgba(217,70,239,0.08); color: var(--fuchsia); border: 1px solid rgba(217,70,239,0.18); }
+
+/* ── Tables ── */
+.reveal table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.72em;
+  border-radius: 12px;
+  overflow: hidden;
+  margin: 10px 0;
+}
+
+.reveal table th {
+  background: rgba(109, 40, 217, 0.35);
+  color: white;
+  padding: 11px 16px;
+  font-weight: 600;
+  text-align: left;
+  font-family: 'Space Grotesk', sans-serif;
+}
+
+.reveal table td {
+  background: var(--card-bg);
+  padding: 10px 16px;
+  border-bottom: 1px solid rgba(139,92,246,0.06);
+}
+
+.reveal table tr:last-child td { border-bottom: none; }
+
+/* ── Quote ── */
+.quote {
+  border-left: 2px solid var(--violet);
+  background: rgba(139,92,246,0.04);
+  padding: 14px 22px;
+  border-radius: 0 10px 10px 0;
+  font-style: italic;
+  color: var(--text-dim);
+  font-size: 0.88em;
+  margin: 12px 0;
+}
+
+/* ── Check list ── */
+.checks { list-style: none; padding: 0; margin: 8px 0; }
+.checks li {
+  padding: 4px 0;
+  font-size: 0.78em;
+  color: var(--text-dim);
+  padding-left: 24px;
+  position: relative;
+  line-height: 1.55;
+}
+.checks li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 7px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: rgba(52,211,153,0.12);
+  border: 1px solid rgba(52,211,153,0.25);
+  background-image: url("data:image/svg+xml,%3Csvg width='8' height='6' viewBox='0 0 8 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 3L3 5L7 1' stroke='%2334d399' stroke-width='1.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+}
+
+/* ── Scenario ── */
+.scenario {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 14px 18px 14px 22px;
+  font-size: 0.78em;
+  margin: 6px 0;
+}
+.scenario-r { border-left: 3px solid var(--rose); }
+.scenario-g { border-left: 3px solid var(--emerald); }
+
+.scenario .lbl {
+  font-family: 'Space Grotesk', sans-serif;
+  font-weight: 600;
+  font-size: 0.78em;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 4px;
+}
+
+/* ── Flow steps ── */
+.flow {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin: 16px 0;
+}
+
+.flow-step {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  padding: 10px 18px;
+  font-size: 0.72em;
+  font-weight: 500;
+}
+
+.flow-step:first-child { border-radius: 10px 0 0 10px; }
+.flow-step:last-child  { border-radius: 0 10px 10px 0; }
+
+.flow-step-on {
+  background: var(--violet-dark);
+  border-color: var(--violet);
+  color: white;
+}
+
+.flow-sep {
+  background: var(--card-bg);
+  border-top: 1px solid var(--card-border);
+  border-bottom: 1px solid var(--card-border);
+  padding: 10px 4px;
+  font-size: 0.65em;
+  color: var(--text-muted);
+}
+
+/* ── Stats ── */
+.stat-num {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 2.6em;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+}
+
+.stat-label {
+  font-size: 0.62em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-top: 4px;
+}
+
+.c-violet  { color: var(--violet-light); }
+.c-cyan    { color: var(--cyan); }
+.c-fuchsia { color: var(--fuchsia); }
+.c-emerald { color: var(--emerald); }
+.c-rose    { color: var(--rose); }
+.c-amber   { color: var(--amber); }
+.c-dim     { color: var(--text-dim); }
+.c-muted   { color: var(--text-muted); }
+.small     { font-size: 0.72em; color: var(--text-dim); }
+
+/* ── Title + Closing overrides ── */
+.title-slide, .closing-slide {
+  text-align: center !important;
+  justify-content: center !important;
+  align-items: center !important;
+}
+
+.title-slide h1 {
+  font-size: 3.6em;
+  background: linear-gradient(135deg, var(--violet-lighter), var(--fuchsia), var(--cyan));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 8px;
+}
+
+.closing-slide h1 {
+  font-size: 3em;
+  background: linear-gradient(135deg, var(--violet-lighter), var(--fuchsia), var(--cyan));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--violet), transparent);
+  border: none;
+  margin: 16px auto;
+  opacity: 0.4;
+}
+
+/* ── Slide dimensions ── */
+.reveal .slides { width: 1100px; }
+</style>
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+<!-- ===== SLIDE 1: TITLE ===== -->
+<section class="title-slide">
+  <h1>Bayex</h1>
+  <p class="c-dim" style="font-size:1.05em; margin-bottom:6px;">Earn Yield on Idle Prediction Market Positions</p>
+  <p style="margin-bottom:20px;"><span style="font-family:'JetBrains Mono'; font-size:0.72em; color:var(--cyan); letter-spacing:0.05em;">// uniswap v4 hook</span></p>
+  <p><span style="display:inline-block; background:linear-gradient(135deg,var(--violet-dark),var(--fuchsia)); color:white; padding:8px 26px; border-radius:100px; font-size:0.68em; font-weight:600; letter-spacing:0.05em; text-transform:uppercase;">Atrium UHI8 Hackathon</span></p>
+</section>
+
+<!-- ===== SLIDE 2: IDLE CAPITAL ===== -->
+<section>
+  <h1>The Problem: Idle Capital</h1>
+  <p>Prediction market traders buy positions and then <strong>wait</strong>.</p>
+
+  <div class="grid-3 mt">
+    <div class="card" style="text-align:center; padding:28px 16px;">
+      <div class="stat-num c-rose">$$$</div>
+      <div class="stat-label">Locked Until Resolution</div>
+    </div>
+    <div class="card" style="text-align:center; padding:28px 16px;">
+      <div class="stat-num c-amber">0%</div>
+      <div class="stat-label">Yield While Waiting</div>
+    </div>
+    <div class="card" style="text-align:center; padding:28px 16px;">
+      <div class="stat-num c-muted">Weeks</div>
+      <div class="stat-label">Typical Hold Duration</div>
+    </div>
+  </div>
+
+  <p class="mt">A trader who buys $10k of YES tokens at $0.60 has <strong>$10k sitting idle</strong> until the market resolves &mdash; days, weeks, or months later. That capital earns nothing.</p>
+
+  <div class="card mt" style="text-align:center; border-top:2px solid var(--violet);">
+    <p style="margin:0;"><strong>What if traders could earn fees on those positions while they wait?</strong></p>
+  </div>
+</section>
+
+<!-- ===== SLIDE 3: THE SOLUTION ===== -->
+<section>
+  <h1>The Solution: LP with Your Positions</h1>
+  <p>Traders deposit their conditional tokens + USDC into a Uniswap v4 pool and <strong>earn trading fees</strong> on capital that would otherwise sit idle.</p>
+
+  <div class="grid-2 mt">
+    <div class="card card-f" style="padding:22px;">
+      <h3>Without Bayex</h3>
+      <p class="small" style="margin:0 0 8px;">Buy YES tokens &rarr; hold &rarr; wait for resolution &rarr; redeem.</p>
+      <p class="small" style="margin:0;">Capital is <strong>100% idle</strong>. Zero yield. Opportunity cost compounds every day the market stays open.</p>
+    </div>
+    <div class="card card-e" style="padding:22px;">
+      <h3>With Bayex</h3>
+      <p class="small" style="margin:0 0 8px;">Buy YES tokens &rarr; LP into YES/USDC pool &rarr; <strong>earn fees</strong> &rarr; withdraw &rarr; redeem.</p>
+      <p class="small" style="margin:0;">Capital is <strong>productive</strong>. Fees accumulate in USDC. Position exposure maintained.</p>
+    </div>
+  </div>
+
+  <div class="quote mt">But LP-ing in prediction markets has two problems that make it unprofitable. Bayex solves both.</div>
+</section>
+
+<!-- ===== SLIDE 4: THE TWO PROBLEMS ===== -->
+<section>
+  <h1>Why LP-ing Doesn't Work Today</h1>
+  <p class="small" style="margin-bottom:14px;">Prediction market LPs face a <strong>double disadvantage</strong> that doesn't exist in regular DeFi pools.</p>
+
+  <div class="grid-2 mt">
+    <div class="card card-f" style="padding:22px;">
+      <h3 style="color:var(--rose);">Problem 1: Arb Extraction</h3>
+      <p class="small" style="margin:0 0 10px;">When external odds shift (news, orderbook movement), arbitrageurs trade against stale AMM prices and <strong>extract value from LPs</strong> before the pool adjusts.</p>
+      <p class="small" style="margin:0 0 10px;">This is <strong>Loss-Versus-Rebalancing (LVR)</strong> &mdash; and it's amplified in prediction markets because prices move sharply around events.</p>
+      <p class="small c-muted" style="margin:0;">LPs subsidize arb bots that contribute nothing beyond bridging a latency gap.</p>
+    </div>
+    <div class="card card-v" style="padding:22px;">
+      <h3 style="color:var(--amber);">Problem 2: Worthless Fees</h3>
+      <p class="small" style="margin:0 0 10px;">Conditional tokens resolve to either <strong>$1 or $0</strong>. Standard AMMs collect fees in both tokens &mdash; meaning LPs accumulate fees in a token that might become worthless.</p>
+      <p class="small" style="margin:0 0 10px;">An LP who earned 5% in YES-token fees <strong>earns nothing</strong> if YES resolves to zero.</p>
+      <p class="small c-muted" style="margin:0;">Even profitable LPs can end up with zero real returns at resolution.</p>
+    </div>
+  </div>
+
+  <div class="quote mt">Together, these problems make LP-ing a losing proposition &mdash; so traders keep their capital idle instead.</div>
+</section>
+
+<!-- ===== SLIDE 5: BAYEX OVERVIEW ===== -->
+<section>
+  <h1>Bayex: Two Solutions in One Hook</h1>
+  <p>A Uniswap v4 hook that makes prediction market LP-ing <strong>safe and profitable</strong>.</p>
+
+  <div class="grid-2 mt">
+    <div class="card card-f" style="padding:22px;">
+      <h3>Dynamic Arb-Resistant Fees</h3>
+      <p class="small" style="margin:0 0 8px;">Fees automatically <strong>spike during arb waves</strong> and return to base rate for organic traders. Uses on-chain flow imbalance as the signal &mdash; no oracle needed.</p>
+      <p style="margin:0;"><span class="pill pill-r">Arb wave</span> <span class="pill pill-r">max fee</span> &nbsp;&nbsp; <span class="pill pill-g">Organic trade</span> <span class="pill pill-g">base fee</span></p>
+    </div>
+    <div class="card card-v" style="padding:22px;">
+      <h3>USDC-Denominated Fees</h3>
+      <p class="small" style="margin:0 0 8px;">LPs choose to receive fees in <strong>USDC instead of conditional tokens</strong>. The hook bypasses v4's built-in fee system and collects fees directly in the LP's preferred denomination.</p>
+      <p style="margin:0;"><span class="pill pill-c">Default: 100% USDC</span> &nbsp;&nbsp; <span class="pill pill-v">Configurable per LP</span></p>
+    </div>
+  </div>
+
+  <div class="card mt" style="text-align:center; border-top:2px solid var(--emerald);">
+    <p style="margin:0;"><strong>Arbs pay more. LPs earn in stable value. Idle positions become productive.</strong></p>
+  </div>
+</section>
+
+<!-- ===== SLIDE 5: THE INSIGHT ===== -->
+<section>
+  <h1>The Insight</h1>
+  <p>Arbitrage has an <strong>on-chain signature</strong>:</p>
+
+  <div class="grid-2 mt">
+    <div class="card card-f" style="text-align:center;">
+      <h3 style="color:var(--rose);">Arb Flow</h3>
+      <p style="font-size:1.6em; margin:10px 0; letter-spacing:10px; color:var(--rose);">&#8594;&#8594;&#8594;&#8594;</p>
+      <p class="small" style="margin:0;">Heavy one-directional bursts after external price movement</p>
+    </div>
+    <div class="card card-e" style="text-align:center;">
+      <h3 style="color:var(--emerald);">Organic Flow</h3>
+      <p style="font-size:1.6em; margin:10px 0; letter-spacing:10px; color:var(--emerald);">&#8594;&#8592;&#8594;&#8592;</p>
+      <p class="small" style="margin:0;">Balanced mixed-direction trading over time</p>
+    </div>
+  </div>
+
+  <div class="card mt" style="text-align:center; border-top: 2px solid var(--violet);">
+    <p style="margin:0;"><strong>No oracle. No keeper. No off-chain infra.</strong></p>
+    <p class="small" style="margin:4px 0 0 0;">The pool's own trading flow is the only signal we need. Splitting across wallets doesn't help &mdash; the flow is still one-sided.</p>
+  </div>
+</section>
+
+<!-- ===== SLIDE 6: THE MECHANISM ===== -->
+<section>
+  <h1>Dynamic Fee Formula</h1>
+
+  <pre><code>fee = baseFee + k * (netDirectionalFlow / totalFlow)^2</code></pre>
+
+  <table class="mt">
+    <thead><tr><th>Pool State</th><th>Imbalance</th><th>Fee Level</th></tr></thead>
+    <tbody>
+      <tr><td>Quiet, balanced trading</td><td><span class="pill pill-g">~0</span></td><td>baseFee <span class="c-muted">(cheap)</span></td></tr>
+      <tr><td>Moderate one-sided flow</td><td><span class="pill pill-a">0.3-0.7</span></td><td>Elevated</td></tr>
+      <tr><td>Arb wave (heavy one-sided)</td><td><span class="pill pill-r">~1.0</span></td><td>baseFee + k <span class="c-muted">(max)</span></td></tr>
+    </tbody>
+  </table>
+
+  <div class="grid-2 mt">
+    <div class="card" style="padding:14px 18px;">
+      <h3>Time Decay</h3>
+      <p class="small" style="margin:0;">Imbalance resets after a configurable window. Fees return to base rate automatically once the arb wave passes.</p>
+    </div>
+    <div class="card" style="padding:14px 18px;">
+      <h3>Pool-Level Config</h3>
+      <p class="small" style="margin:0;">Owner sets <code>baseFee</code>, <code>k</code> (max surcharge), <code>windowSize</code>, and <code>decayRate</code> per pool.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===== SLIDE 7: WORKED EXAMPLE ===== -->
+<section>
+  <h1>Worked Example</h1>
+
+  <div class="card mb" style="padding:12px 20px;">
+    <p class="small" style="margin:0;">Pool: <code>YES/USDC</code> &nbsp;&bull;&nbsp; AMM price = <strong>0.60</strong> &nbsp;&bull;&nbsp; News breaks &rarr; true prob = <strong>0.65</strong></p>
+  </div>
+
+  <div class="scenario scenario-r">
+    <div class="lbl" style="color:var(--rose);">Arb Wave</div>
+    <p style="margin:4px 0 0;">
+      Arb 1 buys YES &rarr; imbalance <span class="pill pill-r">1.0</span> &rarr; pays <code>baseFee + k</code><br>
+      Arb 2 buys YES &rarr; imbalance <span class="pill pill-r">1.0</span> &rarr; pays <code>baseFee + k</code><br>
+      Arb 3 buys YES &rarr; imbalance <span class="pill pill-r">1.0</span> &rarr; pays <code>baseFee + k</code>
+    </p>
+  </div>
+
+  <p style="text-align:center; padding:4px 0; color:var(--text-muted); font-size:0.76em;">&#9203; 5 minutes pass &mdash; decay kicks in</p>
+
+  <div class="scenario scenario-g">
+    <div class="lbl" style="color:var(--emerald);">Organic Trade</div>
+    <p style="margin:4px 0 0;">Trader buys NO &rarr; imbalance <span class="pill pill-g">~0</span> &rarr; pays <code>baseFee</code> <span class="c-muted">(cheap)</span></p>
+  </div>
+
+  <p style="text-align:center; margin-top:14px;"><strong>Every arb in the wave pays the surcharge. The surplus goes to LPs, not arb bots.</strong></p>
+</section>
+
+<!-- ===== SLIDE 8: USDC FEE COLLECTION ===== -->
+<section>
+  <h1>USDC-Denominated Fees</h1>
+  <h2>How It Works</h2>
+
+  <p class="small" style="margin-bottom:12px;">Each LP configures a <strong>fee denomination split</strong> (default: 100% USDC). The hook bypasses v4's built-in fee mechanism and collects fees directly using both delta return hooks.</p>
+
+  <table>
+    <thead><tr><th>Swap Direction</th><th>USDC Fee Via</th><th>Token Fee Via</th></tr></thead>
+    <tbody>
+      <tr><td>USDC &rarr; YES</td><td><code>beforeSwap</code> delta</td><td><code>afterSwap</code> return</td></tr>
+      <tr><td>YES &rarr; USDC</td><td><code>afterSwap</code> return</td><td><code>beforeSwap</code> delta</td></tr>
+    </tbody>
+  </table>
+
+  <div class="grid-2 mt">
+    <div class="card card-v" style="padding:14px 18px;">
+      <h3>Aggregate Split</h3>
+      <p class="small" style="margin:0;">The weighted average of all LP preferences determines the actual USDC/token fee ratio that swappers pay.</p>
+    </div>
+    <div class="card card-c" style="padding:14px 18px;">
+      <h3>Fair Distribution</h3>
+      <p class="small" style="margin:0;">Fee-per-liquidity accumulators with checkpointing ensure each LP earns proportional to their liquidity and split preference.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===== SLIDE 9: LP LIFECYCLE ===== -->
+<section>
+  <h1>LP Lifecycle</h1>
+
+  <div class="flow" style="justify-content:center;">
+    <div class="flow-step flow-step-on" style="border-radius:10px 0 0 10px;">Add Liquidity</div>
+    <div class="flow-sep">&rarr;</div>
+    <div class="flow-step">Configure Split</div>
+    <div class="flow-sep">&rarr;</div>
+    <div class="flow-step">Earn Fees</div>
+    <div class="flow-sep">&rarr;</div>
+    <div class="flow-step">Claim Fees</div>
+    <div class="flow-sep">&rarr;</div>
+    <div class="flow-step" style="border-radius:0 10px 10px 0;">Remove Liquidity</div>
+  </div>
+
+  <div class="grid-2 mt">
+    <div class="card card-f">
+      <h3>Registration</h3>
+      <p class="small" style="margin:0;">LP address passed via <code>hookData</code>. Default: 100% USDC fees. Only trusted routers can register LPs.</p>
+    </div>
+    <div class="card card-v">
+      <h3>Fee Split Config</h3>
+      <p class="small" style="margin:0;">LP calls <code>configureFeeSplit()</code> &mdash; e.g. 70/30 USDC/token. Existing fees snapshotted before change.</p>
+    </div>
+    <div class="card card-c">
+      <h3>Accumulation</h3>
+      <p class="small" style="margin:0;">Separate USDC and token accumulators track each LP's share weighted by denomination preference.</p>
+    </div>
+    <div class="card card-e">
+      <h3>Claims &amp; Exit</h3>
+      <p class="small" style="margin:0;">LP calls <code>claimFees()</code> anytime. Accrued fees preserved even after removing liquidity.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===== SLIDE 10: ARCHITECTURE ===== -->
+<section>
+  <h1>Architecture</h1>
+  <h2>v4 Hook Entry Points</h2>
+
+  <table>
+    <thead><tr><th>Hook</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td><code>afterInitialize</code></td><td>Initialize flow state for new pool</td></tr>
+      <tr><td><code>beforeAddLiquidity</code></td><td>Validate trusted router + hookData format</td></tr>
+      <tr><td><code>afterAddLiquidity</code></td><td>Track LP position, update aggregate weights</td></tr>
+      <tr><td><code>beforeSwap</code></td><td>Compute dynamic fee, take input-side fee via delta</td></tr>
+      <tr><td><code>afterSwap</code></td><td>Take output-side fee, update flow state + accumulators</td></tr>
+      <tr><td><code>afterRemoveLiquidity</code></td><td>Snapshot fees, reduce tracked position</td></tr>
+    </tbody>
+  </table>
+
+  <div class="grid-2 mt">
+    <div class="card card-f" style="padding:14px 18px;">
+      <h3>Security</h3>
+      <p style="margin:0;"><span class="pill pill-f">Ownable2Step</span> <span class="pill pill-f">Trusted Router</span> <span class="pill pill-f">ReentrancyGuard</span> <span class="pill pill-f">Safe ERC20</span></p>
+    </div>
+    <div class="card card-c" style="padding:14px 18px;">
+      <h3>Internals</h3>
+      <p style="margin:0;"><span class="pill pill-c">Transient Storage</span> <span class="pill pill-c">WAD Math</span> <span class="pill pill-c">Fee Checkpoints</span> <span class="pill pill-c">Time Decay</span></p>
+    </div>
+  </div>
+</section>
+
+<!-- ===== SLIDE 11: SCOPE OF WORK ===== -->
+<section>
+  <h1>Scope of Work</h1>
+
+  <div class="grid-3 mt">
+    <div class="card" style="text-align:center; padding:28px 16px;">
+      <div class="stat-num c-violet">695</div>
+      <div class="stat-label">Lines of Solidity</div>
+    </div>
+    <div class="card" style="text-align:center; padding:28px 16px;">
+      <div class="stat-num c-cyan">37</div>
+      <div class="stat-label">Tests Passing</div>
+    </div>
+    <div class="card" style="text-align:center; padding:28px 16px;">
+      <div class="stat-num c-fuchsia">9</div>
+      <div class="stat-label">Hook Entry Points</div>
+    </div>
+  </div>
+
+  <div class="grid-2 mt">
+    <div>
+      <h3>Core Systems</h3>
+      <ul class="checks">
+        <li>Dynamic fee engine with flow-based imbalance detection</li>
+        <li>USDC-denominated fee collection via delta returns</li>
+        <li>Per-LP configurable fee denomination split</li>
+        <li>Fee-per-liquidity accumulator with checkpointing</li>
+        <li>Full LP lifecycle: register, configure, earn, claim, exit</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Infrastructure</h3>
+      <ul class="checks">
+        <li>CREATE2 salt mining for hook address flags</li>
+        <li>Production deployment script with verification</li>
+        <li>Trusted router access control pattern</li>
+        <li>Transient storage for cross-callback data</li>
+        <li>8 security issues identified and resolved</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ===== SLIDE 12: TESTS ===== -->
+<section>
+  <h1>Test Coverage</h1>
+
+  <div class="grid-2">
+    <div>
+      <h3>Fee Collection</h3>
+      <ul class="checks">
+        <li>USDC fees collected on swap</li>
+        <li>Mixed USDC/token split collection</li>
+        <li>Multiple LPs with different splits</li>
+        <li>Aggregate ratio computes correctly</li>
+        <li>Fee split change snapshots earned fees</li>
+        <li>LP claims correct USDC + token amounts</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Dynamic Fees &amp; Security</h3>
+      <ul class="checks">
+        <li>Escalating fees during arb wave</li>
+        <li>Fee decay over time window</li>
+        <li>Zero-weight skip prevents stuck fees</li>
+        <li>Untrusted router reverts</li>
+        <li>Owner-only pool configuration</li>
+        <li>Two-step ownership transfer</li>
+      </ul>
+    </div>
+  </div>
+
+  <pre class="mt"><code>$ forge test -v                                  <span style="color:var(--emerald);">37 passing</span>, <span style="color:var(--text-muted);">0 failing</span></code></pre>
+</section>
+
+<!-- ===== SLIDE 13: TRADEOFFS ===== -->
+<section>
+  <h1>Design Tradeoffs</h1>
+
+  <table>
+    <thead><tr><th>Property</th><th>Bayex</th></tr></thead>
+    <tbody>
+      <tr><td>Decentralized</td><td><span class="pill pill-g">Yes</span> &nbsp;no oracle, no keeper, fully on-chain</td></tr>
+      <tr><td>Instant execution</td><td><span class="pill pill-g">Yes</span> &nbsp;no auction delay</td></tr>
+      <tr><td>Captures first arb</td><td><span class="pill pill-a">Partially</span> &nbsp;first trade creates the signal</td></tr>
+      <tr><td>Captures arb wave</td><td><span class="pill pill-g">Yes</span> &nbsp;escalating fees on sustained flow</td></tr>
+      <tr><td>Manipulation resistant</td><td><span class="pill pill-g">Yes</span> &nbsp;splitting across wallets still one-sided</td></tr>
+      <tr><td>Fee denomination</td><td><span class="pill pill-g">Configurable</span> &nbsp;per-LP, default 100% USDC</td></tr>
+    </tbody>
+  </table>
+
+  <div class="card mt" style="padding:14px 20px;">
+    <h3>Known Limitations</h3>
+    <p class="small" style="margin:0;">Fee distribution doesn't yet scope to in-range ticks (planned) &nbsp;&middot;&nbsp; WAD-precision accumulators sufficient for most pool sizes &nbsp;&middot;&nbsp; First arb trade pays elevated fee but provides price discovery</p>
+  </div>
+</section>
+
+<!-- ===== SLIDE 14: ROADMAP ===== -->
+<section>
+  <h1>What's Next</h1>
+
+  <div class="grid-2 mt">
+    <div>
+      <h3>Near Term</h3>
+      <ul class="checks">
+        <li>Tick-scoped fee distribution (in-range only)</li>
+        <li>Mainnet deployment on Unichain / Base</li>
+        <li>Custom router with built-in LP hookData encoding</li>
+        <li>Frontend for LP fee split configuration and claims</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Future</h3>
+      <ul class="checks">
+        <li>Multi-outcome markets (beyond binary YES/NO)</li>
+        <li>Cross-pool flow correlation for shared-event markets</li>
+        <li>Dynamic <code>k</code> calibration from historical LVR data</li>
+        <li>Integration with existing prediction market protocols</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card mt" style="text-align:center; border-top:2px solid var(--violet);">
+    <p style="margin:0;">Bayex turns idle prediction market positions into <strong>productive, fee-earning liquidity</strong>.</p>
+  </div>
+</section>
+
+<!-- ===== SLIDE 15: CLOSING ===== -->
+<section class="closing-slide">
+  <h1>Bayex</h1>
+  <p class="c-dim" style="font-size:1em; margin-bottom:4px;">Earn Yield on Idle Prediction Market Positions</p>
+  <hr class="divider" style="width:200px;">
+  <p style="margin-top:14px;">
+    <span class="pill pill-v">Uniswap v4 Hook</span>
+    <span class="pill pill-f">Dynamic Fees</span>
+    <span class="pill pill-c">USDC-Denominated</span>
+    <span class="pill pill-v">Per-LP Configurable</span>
+  </p>
+  <p style="margin-top:28px;">
+    <span style="display:inline-block; background:linear-gradient(135deg,var(--violet-dark),var(--fuchsia)); color:white; padding:8px 26px; border-radius:100px; font-size:0.68em; font-weight:600; letter-spacing:0.05em; text-transform:uppercase;">Atrium UHI8 Hackathon</span>
+  </p>
+</section>
+
+</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script>
+Reveal.initialize({
+  hash: true,
+  controls: true,
+  progress: true,
+  center: false,
+  transition: 'none',
+  width: 1100,
+  height: 700,
+  margin: 0.04,
+});
+</script>
+</body>
+</html>
