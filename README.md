@@ -68,12 +68,65 @@ being extracted as profit.
 
 The main concession: the very first arbitrage trade in a new direction gets through at roughly `baseFee`. But this trade is also what provides price discovery — so paying for it is arguably correct. The hook captures the surplus from the **wave** of follow-on arbitrage that typically follows.
 
+## USDC-Denominated Fee Collection
+
+LPs in prediction market pools are exposed to accumulating fees in the conditional token, which can go to zero at market resolution. Bayex solves this by letting each LP configure their preferred fee denomination split, defaulting to 100% USDC.
+
+### How It Works
+
+1. **Hook-managed fees** — The pool's built-in LP fee is set to 0. Instead, the hook collects fees directly from both sides of each swap using v4's delta return system.
+2. **Per-LP fee split** — Each LP sets a `feeSplitUSDC` value (0–100%). This controls what fraction of their earned fees are denominated in USDC vs. the conditional token.
+3. **Aggregate split** — The pool-wide USDC/token fee ratio is the liquidity-weighted average of all LP preferences. This determines how much of each swap's fee is taken in USDC vs. token.
+4. **Two-sided collection** — `beforeSwap` takes the fee from the specified (input) side, `afterSwap` takes from the unspecified (output) side. Which currency maps to which side depends on swap direction.
+
+### Fee Split Mapping by Swap Direction
+
+| Swap Direction        | Specified (input) | Unspecified (output) | USDC fee via       | Token fee via      |
+| --------------------- | ----------------- | -------------------- | ------------------ | ------------------ |
+| USDC → YES (zeroForOne) | currency0 (USDC)  | currency1 (YES)      | beforeSwap delta   | afterSwap return   |
+| YES → USDC (oneForZero) | currency1 (YES)   | currency0 (USDC)     | afterSwap return   | beforeSwap delta   |
+
+### Fee Distribution Math
+
+Each LP earns from two buckets based on their weighted contribution:
+
+- **USDC bucket**: LP earns proportional to `LP_liquidity * LP_feeSplitUSDC / totalUSDCWeight`
+- **Token bucket**: LP earns proportional to `LP_liquidity * (1 - LP_feeSplitUSDC) / totalTokenWeight`
+
+Fee-per-liquidity accumulators (similar to Uniswap's `feeGrowthGlobal`) track cumulative fees. When an LP modifies their position or changes their split, pending fees are snapshotted into their accrued balance.
+
+### LP Lifecycle
+
+1. **Add liquidity** — LP address is passed via `hookData` (since `sender` in v4 callbacks is the router, not the user). New positions default to 100% USDC.
+2. **Configure split** — LP calls `configureFeeSplit()` to change their USDC/token preference. Existing fees are snapshotted at the old split.
+3. **Claim fees** — LP calls `claimFees()` to withdraw accrued USDC and token fees.
+4. **Remove liquidity** — Accrued fees are preserved and remain claimable after removal.
+
 ## Architecture
 
 ### Hook Entry Points
 
-- **`beforeSwap`** — Reads current flow imbalance state, computes the dynamic fee, returns `lpFeeOverride`.
-- **`afterSwap`** — Updates the directional flow tracking (net volume, timestamps, decay).
+| Hook                    | Purpose                                                                 |
+| ----------------------- | ----------------------------------------------------------------------- |
+| `afterInitialize`       | Initialize flow state for the pool                                      |
+| `beforeAddLiquidity`    | Validate that `hookData` contains LP address                            |
+| `afterAddLiquidity`     | Track LP position, update pool weights                                  |
+| `beforeRemoveLiquidity` | Validate `hookData`                                                     |
+| `afterRemoveLiquidity`  | Snapshot fees, reduce LP position, update pool weights                  |
+| `beforeSwap`            | Compute dynamic fee, take specified-side fee, store transient data      |
+| `afterSwap`             | Take unspecified-side fee, update flow state and fee accumulators       |
+
+### External Functions
+
+| Function             | Description                                                        |
+| -------------------- | ------------------------------------------------------------------ |
+| `configurePool`      | Set pool parameters (baseFee, k, windowSize, decayRate)            |
+| `configureFeeSplit`  | LP sets their USDC/token fee preference for a position             |
+| `claimFees`          | LP withdraws accrued USDC and token fees                           |
+| `getPendingFees`     | View pending (unclaimed) fees for an LP position                   |
+| `getAggregateUSDCSplit` | View the pool's current aggregate USDC fee split                |
+| `getCurrentFee`      | View the current dynamic fee for the pool                          |
+| `getImbalanceRatio`  | View the current flow imbalance ratio                              |
 
 ### Key Parameters
 
@@ -86,7 +139,22 @@ The main concession: the very first arbitrage trade in a new direction gets thro
 
 ## Development
 
-_Coming soon — Foundry project setup, contracts, and tests._
+```bash
+forge build    # compile
+forge test -vv # run tests
+```
+
+### Test Coverage
+
+- LP registration and fee state tracking
+- USDC-only and mixed-split fee collection
+- Fee claiming flow
+- Fee split configuration with snapshotting
+- Multiple LPs with different splits and correct aggregate ratio
+- Partial liquidity removal preserving accrued fees
+- Flow imbalance escalation, balanced flow, and time decay
+- Arbitrage scenario (escalating fees on one-sided flow)
+- Access control and input validation
 
 ## License
 
